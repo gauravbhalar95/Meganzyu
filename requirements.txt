@@ -1,3 +1,4 @@
 pyTelegramBotAPI
 mega.py
 Flask
+tenacity
