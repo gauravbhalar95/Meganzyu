@@ -3,3 +3,4 @@ mega.py
 Flask
 tenacity
 megacl
+pycryptodome
