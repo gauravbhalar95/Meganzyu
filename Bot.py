@@ -17,12 +17,11 @@ user_target_folder = {}
 # Logging configuration
 logging.basicConfig(level=logging.DEBUG)
 
-# Command to log in to Mega.nz
+# Mega.nz Login
 @bot.message_handler(commands=['meganz'])
 def handle_mega_login(message):
     global mega_client
     args = message.text.split(maxsplit=2)
-
     try:
         if len(args) == 1:
             mega_client = Mega().login()
@@ -36,11 +35,11 @@ def handle_mega_login(message):
     except Exception as e:
         bot.reply_to(message, f"Login failed: {str(e)}")
 
-# Command to list folders
+# List Folders
 @bot.message_handler(commands=['listfolders'])
 def list_folders(message):
     global mega_client
-    if mega_client is None:
+    if not mega_client:
         bot.reply_to(message, "Please log in first using /meganz <username> <password>.")
         return
 
@@ -55,11 +54,11 @@ def list_folders(message):
     except Exception as e:
         bot.reply_to(message, f"Failed to retrieve folders: {str(e)}")
 
-# Set target folder based on user reply
+# Set Target Folder
 @bot.message_handler(func=lambda message: message.text.isdigit())
 def set_target_folder(message):
     global mega_client, user_target_folder
-    if mega_client is None:
+    if not mega_client:
         bot.reply_to(message, "Please log in first using /meganz <username> <password>.")
         return
 
@@ -76,11 +75,11 @@ def set_target_folder(message):
     except Exception as e:
         bot.reply_to(message, f"Error setting folder: {str(e)}")
 
-# Handle any file upload
+# Handle File Upload
 @bot.message_handler(content_types=['document', 'photo', 'video', 'audio'])
 def handle_file_upload(message):
     global mega_client, user_target_folder
-    if mega_client is None:
+    if not mega_client:
         bot.reply_to(message, "Please log in first using /meganz <username> <password>.")
         return
 
@@ -89,11 +88,8 @@ def handle_file_upload(message):
         return
 
     target_folder = user_target_folder[message.chat.id]
-
     try:
-        # Determine file type and download
-        file_info = None
-        file_name = None
+        file_info, file_name = None, None
         if message.content_type == 'document':
             file_info = bot.get_file(message.document.file_id)
             file_name = message.document.file_name
@@ -107,42 +103,34 @@ def handle_file_upload(message):
             file_info = bot.get_file(message.audio.file_id)
             file_name = message.audio.file_name
 
-        # Create temp folder if not exists
         if not os.path.exists(TEMP_FOLDER):
             os.makedirs(TEMP_FOLDER)
 
-        # Save file locally
         file_path = os.path.join(TEMP_FOLDER, file_name)
         downloaded_file = bot.download_file(file_info.file_path)
         with open(file_path, 'wb') as new_file:
             new_file.write(downloaded_file)
 
-        # Upload to Mega.nz
         bot.reply_to(message, "Uploading the file to Mega.nz...")
         public_link = upload_to_mega(file_path, target_folder)
         bot.reply_to(message, f"File uploaded successfully! Public link: {public_link}")
-
-        # Cleanup
         os.remove(file_path)
     except Exception as e:
         logging.error("Error during file upload", exc_info=True)
         bot.reply_to(message, f"File upload failed: {str(e)}")
 
-# Upload file to Mega.nz
+# Upload to Mega.nz
 def upload_to_mega(file_path, folder_name):
     try:
-        # Find or create the target folder
         folders = mega_client.find(folder_name)
         folder = folders[0] if folders else mega_client.create_folder(folder_name)
-
-        # Upload file
         file = mega_client.upload(file_path, folder)
         return mega_client.get_upload_link(file)
     except Exception as e:
         logging.error("Error uploading to Mega.nz", exc_info=True)
         raise
 
-# Flask app for webhook
+# Flask App
 app = Flask(__name__)
 
 @app.route('/' + API_TOKEN, methods=['POST'])
