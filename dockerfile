@@ -21,4 +21,4 @@ ENV WEBHOOK_URL=""
 EXPOSE 8080
 
 # Command to run the Flask app
-CMD python app.py
+CMD python Bot.py
