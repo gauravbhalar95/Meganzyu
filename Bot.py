@@ -1,148 +1,95 @@
 import os
-import logging
+import subprocess
 from flask import Flask, request
 import telebot
-from mega import Mega
 
-# Environment Variables
-API_TOKEN = os.getenv('API_TOKEN')
-WEBHOOK_URL = os.getenv('WEBHOOK_URL')  # Public URL for the bot
-TEMP_FOLDER = "temp"
+# Environment variables
+API_TOKEN = os.getenv("API_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+bot = telebot.TeleBot(API_TOKEN, parse_mode="HTML")
 
-# Initialize bot and Mega
-bot = telebot.TeleBot(API_TOKEN, parse_mode='HTML')
-mega_client = None
-user_target_folder = {}
-
-# Logging configuration
-logging.basicConfig(level=logging.DEBUG)
-
-# Mega.nz Login
-@bot.message_handler(commands=['meganz'])
-def handle_mega_login(message):
-    global mega_client
-    args = message.text.split(maxsplit=2)
-    try:
-        if len(args) == 1:
-            mega_client = Mega().login()
-            bot.reply_to(message, "Logged in to Mega.nz anonymously!")
-        elif len(args) == 3:
-            email, password = args[1], args[2]
-            mega_client = Mega().login(email, password)
-            bot.reply_to(message, "Successfully logged in to Mega.nz!")
-        else:
-            bot.reply_to(message, "Usage: /meganz <username> <password>")
-    except Exception as e:
-        bot.reply_to(message, f"Login failed: {str(e)}")
-
-# List Folders
-@bot.message_handler(commands=['listfolders'])
-def list_folders(message):
-    global mega_client
-    if not mega_client:
-        bot.reply_to(message, "Please log in first using /meganz <username> <password>.")
-        return
-
-    try:
-        folders = mega_client.get_folders()
-        folder_names = [f['a']['n'] for f in folders.values() if 'a' in f and 'n' in f['a']]
-        if not folder_names:
-            bot.reply_to(message, "No folders found. Use the Mega.nz web interface to create folders.")
-        else:
-            folder_list = "\n".join(f"{idx + 1}. {name}" for idx, name in enumerate(folder_names))
-            bot.reply_to(message, f"Available folders:\n{folder_list}\n\nReply with the folder number to select it.")
-    except Exception as e:
-        bot.reply_to(message, f"Failed to retrieve folders: {str(e)}")
-
-# Set Target Folder
-@bot.message_handler(func=lambda message: message.text.isdigit())
-def set_target_folder(message):
-    global mega_client, user_target_folder
-    if not mega_client:
-        bot.reply_to(message, "Please log in first using /meganz <username> <password>.")
-        return
-
-    try:
-        folders = mega_client.get_folders()
-        folder_names = [f['a']['n'] for f in folders.values() if 'a' in f and 'n' in f['a']]
-        folder_index = int(message.text) - 1
-
-        if 0 <= folder_index < len(folder_names):
-            user_target_folder[message.chat.id] = folder_names[folder_index]
-            bot.reply_to(message, f"Target folder set to: {folder_names[folder_index]}")
-        else:
-            bot.reply_to(message, "Invalid folder number. Please try again.")
-    except Exception as e:
-        bot.reply_to(message, f"Error setting folder: {str(e)}")
-
-# Handle File Upload
-@bot.message_handler(content_types=['document', 'photo', 'video', 'audio'])
-def handle_file_upload(message):
-    global mega_client, user_target_folder
-    if not mega_client:
-        bot.reply_to(message, "Please log in first using /meganz <username> <password>.")
-        return
-
-    if message.chat.id not in user_target_folder:
-        bot.reply_to(message, "Please set a target folder using /listfolders.")
-        return
-
-    target_folder = user_target_folder[message.chat.id]
-    try:
-        file_info, file_name = None, None
-        if message.content_type == 'document':
-            file_info = bot.get_file(message.document.file_id)
-            file_name = message.document.file_name
-        elif message.content_type == 'photo':
-            file_info = bot.get_file(message.photo[-1].file_id)
-            file_name = "photo.jpg"
-        elif message.content_type == 'video':
-            file_info = bot.get_file(message.video.file_id)
-            file_name = message.video.file_name
-        elif message.content_type == 'audio':
-            file_info = bot.get_file(message.audio.file_id)
-            file_name = message.audio.file_name
-
-        if not os.path.exists(TEMP_FOLDER):
-            os.makedirs(TEMP_FOLDER)
-
-        file_path = os.path.join(TEMP_FOLDER, file_name)
-        downloaded_file = bot.download_file(file_info.file_path)
-        with open(file_path, 'wb') as new_file:
-            new_file.write(downloaded_file)
-
-        bot.reply_to(message, "Uploading the file to Mega.nz...")
-        public_link = upload_to_mega(file_path, target_folder)
-        bot.reply_to(message, f"File uploaded successfully! Public link: {public_link}")
-        os.remove(file_path)
-    except Exception as e:
-        logging.error("Error during file upload", exc_info=True)
-        bot.reply_to(message, f"File upload failed: {str(e)}")
-
-# Upload to Mega.nz
-def upload_to_mega(file_path, folder_name):
-    try:
-        folders = mega_client.find(folder_name)
-        folder = folders[0] if folders else mega_client.create_folder(folder_name)
-        file = mega_client.upload(file_path, folder)
-        return mega_client.get_upload_link(file)
-    except Exception as e:
-        logging.error("Error uploading to Mega.nz", exc_info=True)
-        raise
-
-# Flask App
+# Flask app
 app = Flask(__name__)
 
-@app.route('/' + API_TOKEN, methods=['POST'])
-def bot_webhook():
-    bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode("utf-8"))])
-    return "!", 200
+# Helper functions
+def execute_mega_command(command):
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        raise Exception(e.stderr.strip())
 
-@app.route('/')
+def get_folders():
+    try:
+        output = execute_mega_command(["megacl", "ls"])
+        folders = [line.split()[-1] for line in output.splitlines() if "<DIR>" in line]
+        return folders
+    except Exception as e:
+        return []
+
+# Bot handlers for file upload
+@bot.message_handler(content_types=["document", "photo", "video", "audio", "voice", "sticker", "document", "animation"])
+def handle_file_upload(message):
+    # Detect file type
+    if message.document:
+        file_id = message.document.file_id
+        file_name = message.document.file_name
+    else:
+        # Handle other types of media (e.g., photos, videos)
+        file_id = message.photo[-1].file_id if message.photo else None
+        file_name = f"{message.date}_{message.chat.id}.jpg"  # Default naming
+
+    if file_id:
+        file_info = bot.get_file(file_id)
+        file_path = file_info.file_path
+
+        try:
+            # Download the file from Telegram
+            downloaded_file = bot.download_file(file_path)
+            with open(file_name, "wb") as new_file:
+                new_file.write(downloaded_file)
+
+            # Get folders from Mega.nz
+            folders = get_folders()
+            if not folders:
+                bot.reply_to(message, "No folders found in Mega.nz. Uploading to root.")
+                execute_mega_command(["megacl", "put", file_name])
+            else:
+                # Send folder list to user
+                markup = telebot.types.InlineKeyboardMarkup()
+                for folder in folders:
+                    markup.add(telebot.types.InlineKeyboardButton(folder, callback_data=f"upload:{file_name}:{folder}"))
+                bot.reply_to(message, "Choose a folder to upload:", reply_markup=markup)
+
+        except Exception as e:
+            bot.reply_to(message, f"Error: {str(e)}")
+
+# Bot callback handler for folder selection
+@bot.callback_query_handler(func=lambda call: call.data.startswith("upload"))
+def handle_folder_selection(call):
+    try:
+        _, file_name, folder = call.data.split(":")
+        # Change directory to selected folder in Mega.nz
+        execute_mega_command(["megacl", "cd", folder])
+        # Upload the file to the selected folder
+        execute_mega_command(["megacl", "put", file_name])
+        # Share and get the public link for the uploaded file
+        link = execute_mega_command(["megacl", "share", "--link", file_name])
+        bot.send_message(call.message.chat.id, f"Uploaded to Mega.nz in folder '{folder}': {link}")
+    except Exception as e:
+        bot.send_message(call.message.chat.id, f"Failed to upload: {str(e)}")
+
+# Webhook handling
+@app.route(f"/{API_TOKEN}", methods=["POST"])
+def webhook():
+    bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode("utf-8"))])
+    return "OK", 200
+
+@app.route("/")
 def set_webhook():
     bot.remove_webhook()
-    bot.set_webhook(url=WEBHOOK_URL + '/' + API_TOKEN, timeout=60)
-    return "Webhook set", 200
+    bot.set_webhook(url=f"{WEBHOOK_URL}/{API_TOKEN}")
+    return "Webhook set!", 200
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=8080, debug=True)
+    app.run(host="0.0.0.0", port=8080)
