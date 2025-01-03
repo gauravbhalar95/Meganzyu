@@ -28,16 +28,24 @@ def get_folders():
         return []
 
 # Bot handlers for file upload
-@bot.message_handler(content_types=["document", "photo", "video", "audio", "voice", "sticker", "document", "animation"])
+@bot.message_handler(content_types=["document", "photo", "video", "audio", "voice", "sticker", "animation"])
 def handle_file_upload(message):
     # Detect file type
     if message.document:
         file_id = message.document.file_id
         file_name = message.document.file_name
+    elif message.photo:
+        file_id = message.photo[-1].file_id  # Get the highest resolution photo
+        file_name = f"{message.date}_{message.chat.id}.jpg"
+    elif message.video:
+        file_id = message.video.file_id
+        file_name = f"{message.date}_{message.chat.id}.mp4"
+    elif message.audio:
+        file_id = message.audio.file_id
+        file_name = f"{message.date}_{message.chat.id}.mp3"
     else:
-        # Handle other types of media (e.g., photos, videos)
-        file_id = message.photo[-1].file_id if message.photo else None
-        file_name = f"{message.date}_{message.chat.id}.jpg"  # Default naming
+        file_id = None
+        file_name = None
 
     if file_id:
         file_info = bot.get_file(file_id)
