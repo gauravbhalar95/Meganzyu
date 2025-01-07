@@ -1,7 +1,3 @@
 pyTelegramBotAPI
 mega.py
 Flask
-tenacity
-megacl
-pycryptodome
-pycrypto
