@@ -1,103 +1,119 @@
-import os
-import subprocess
 from flask import Flask, request
+from mega import Mega
 import telebot
+import os
 
-# Environment variables
-API_TOKEN = os.getenv("API_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-bot = telebot.TeleBot(API_TOKEN, parse_mode="HTML")
-
-# Flask app
+# Initialize Flask app
 app = Flask(__name__)
 
-# Helper functions
-def execute_mega_command(command):
-    try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
-        return result.stdout.strip()
-    except subprocess.CalledProcessError as e:
-        raise Exception(e.stderr.strip())
+# Load environment variables
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+PORT = int(os.getenv("PORT", 8443))  # Default to port 8443
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Webhook URL (set in environment)
 
-def get_folders():
-    try:
-        output = execute_mega_command(["megacl", "ls"])
-        folders = [line.split()[-1] for line in output.splitlines() if "<DIR>" in line]
-        return folders
-    except Exception as e:
-        return []
+# Initialize Telegram bot
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
-# Bot handlers for file upload
-@bot.message_handler(content_types=["document", "photo", "video", "audio", "voice", "sticker", "animation"])
-def handle_file_upload(message):
-    # Detect file type
-    if message.document:
-        file_id = message.document.file_id
-        file_name = message.document.file_name
-    elif message.photo:
-        file_id = message.photo[-1].file_id  # Get the highest resolution photo
-        file_name = f"{message.date}_{message.chat.id}.jpg"
-    elif message.video:
-        file_id = message.video.file_id
-        file_name = f"{message.date}_{message.chat.id}.mp4"
-    elif message.audio:
-        file_id = message.audio.file_id
-        file_name = f"{message.date}_{message.chat.id}.mp3"
-    else:
-        file_id = None
-        file_name = None
+# Mega.nz instance
+mega = Mega()
+user_credentials = {}  # Dictionary to store user-specific credentials
 
-    if file_id:
-        file_info = bot.get_file(file_id)
-        file_path = file_info.file_path
-
-        try:
-            # Download the file from Telegram
-            downloaded_file = bot.download_file(file_path)
-            with open(file_name, "wb") as new_file:
-                new_file.write(downloaded_file)
-
-            # Get folders from Mega.nz
-            folders = get_folders()
-            if not folders:
-                bot.reply_to(message, "No folders found in Mega.nz. Uploading to root.")
-                execute_mega_command(["megacl", "put", file_name])
-            else:
-                # Send folder list to user
-                markup = telebot.types.InlineKeyboardMarkup()
-                for folder in folders:
-                    markup.add(telebot.types.InlineKeyboardButton(folder, callback_data=f"upload:{file_name}:{folder}"))
-                bot.reply_to(message, "Choose a folder to upload:", reply_markup=markup)
-
-        except Exception as e:
-            bot.reply_to(message, f"Error: {str(e)}")
-
-# Bot callback handler for folder selection
-@bot.callback_query_handler(func=lambda call: call.data.startswith("upload"))
-def handle_folder_selection(call):
-    try:
-        _, file_name, folder = call.data.split(":")
-        # Change directory to selected folder in Mega.nz
-        execute_mega_command(["megacl", "cd", folder])
-        # Upload the file to the selected folder
-        execute_mega_command(["megacl", "put", file_name])
-        # Share and get the public link for the uploaded file
-        link = execute_mega_command(["megacl", "share", "--link", file_name])
-        bot.send_message(call.message.chat.id, f"Uploaded to Mega.nz in folder '{folder}': {link}")
-    except Exception as e:
-        bot.send_message(call.message.chat.id, f"Failed to upload: {str(e)}")
-
-# Webhook handling
-@app.route(f"/{API_TOKEN}", methods=["POST"])
+# Webhook endpoint
+@app.route(f"/webhook", methods=["POST"])
 def webhook():
-    bot.process_new_updates([telebot.types.Update.de_json(request.stream.read().decode("utf-8"))])
-    return "OK", 200
+    if request.headers.get('content-type') == 'application/json':
+        json_str = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_str)
+        bot.process_new_updates([update])
+        return "OK", 200
+    else:
+        return "Unsupported Media Type", 415
 
-@app.route("/")
-def set_webhook():
-    bot.remove_webhook()
-    bot.set_webhook(url=f"{WEBHOOK_URL}/{API_TOKEN}")
-    return "Webhook set!", 200
+# Start command to provide instructions
+@bot.message_handler(commands=['start'])
+def start(message):
+    bot.reply_to(
+        message,
+        "Welcome! To use the bot:\n1. Send your Mega.nz email and password in this format:\n   `/credentials email password`\n2. Send any file to upload it to Mega.nz in the folder 'my_mega_folder'."
+    )
 
+# Handle credentials input
+@bot.message_handler(commands=['credentials'])
+def set_credentials(message):
+    try:
+        # Parse the message text
+        _, email, password = message.text.split(' ', 2)
+        user_credentials[message.chat.id] = {"email": email, "password": password}
+        bot.reply_to(message, "Credentials saved! You can now send files for upload.")
+    except ValueError:
+        bot.reply_to(message, "Invalid format. Use `/credentials email password`.")
+
+# Handle file uploads
+@bot.message_handler(content_types=['document', 'photo', 'video', 'audio'])
+def handle_file(message):
+    chat_id = message.chat.id
+
+    # Check if credentials are set
+    if chat_id not in user_credentials:
+        bot.reply_to(message, "Please set your Mega.nz credentials first using `/credentials email password`.")
+        return
+
+    try:
+        # Login to Mega.nz with user credentials
+        credentials = user_credentials[chat_id]
+        mega_client = mega.login(credentials['email'], credentials['password'])
+
+        # Create or find the folder "my_mega_folder"
+        folder_name = "my_mega_folder"
+        folder = mega_client.find(folder_name)
+        if folder is None:
+            folder = mega_client.create_folder(folder_name)
+
+        # Determine the type of content and download it
+        if message.document:
+            file_id = message.document.file_id
+            file_name = message.document.file_name
+        elif message.photo:
+            file_id = message.photo[-1].file_id
+            file_name = f"photo_{message.photo[-1].file_unique_id}.jpg"
+        elif message.video:
+            file_id = message.video.file_id
+            file_name = message.video.file_name or f"video_{message.video.file_unique_id}.mp4"
+        elif message.audio:
+            file_id = message.audio.file_id
+            file_name = message.audio.file_name or f"audio_{message.audio.file_unique_id}.mp3"
+        else:
+            bot.reply_to(message, "Unsupported file type.")
+            return
+
+        # Download the file from Telegram
+        file_info = bot.get_file(file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+
+        # Save file locally
+        with open(file_name, "wb") as new_file:
+            new_file.write(downloaded_file)
+
+        # Upload to Mega.nz
+        uploaded_file = mega_client.upload(file_name, folder[0])
+        mega_link = mega_client.get_upload_link(uploaded_file)
+
+        # Reply with Mega.nz link
+        bot.reply_to(message, f"File uploaded successfully to '{folder_name}'! Here's your link: {mega_link}")
+
+        # Clean up local file
+        os.remove(file_name)
+
+    except Exception as e:
+        bot.reply_to(message, f"An error occurred: {str(e)}")
+
+# Fallback for unsupported messages
+@bot.message_handler(func=lambda message: True)
+def fallback(message):
+    bot.reply_to(message, "Please use `/credentials email password` to set your Mega.nz credentials.")
+
+# Start Flask server
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    bot.remove_webhook()
+    bot.set_webhook(url=WEBHOOK_URL)
+    app.run(host="0.0.0.0", port=PORT)
